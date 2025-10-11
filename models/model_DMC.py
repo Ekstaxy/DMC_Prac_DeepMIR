@@ -39,7 +39,7 @@ class VGGishEncoder(nn.Module):
         return z
     
 class PostProcessor(nn.Module):
-    def __init__(self, input_dim=128, output_dim=10):
+    def __init__(self, input_dim=128, output_dim=26):
         super(PostProcessor, self).__init__()
         self.fc1 = nn.Linear(input_dim, 128)
         self.bn1 = nn.BatchNorm1d(128)
@@ -60,7 +60,13 @@ class PostProcessor(nn.Module):
         self.tanh = nn.Tanh()
 
     def forward(self, track_emb, context):
-        x = torch.cat([track_emb, context], dim=-1)
+        batch_size, num_tracks, _ = track_emb.shape
+
+        x = torch.cat([track_emb, context], dim=-1)  # [batch, num_tracks, input_dim]
+
+        # Flatten for processing: [batch*num_tracks, input_dim]
+        x = x.view(batch_size * num_tracks, -1)
+
         x = self.fc1(x)
         x = self.bn1(x)
         x = self.prelu1(x)
@@ -78,6 +84,9 @@ class PostProcessor(nn.Module):
 
         x = self.fc4(x)
         x = self.tanh(x)
+
+        # Reshape back: [batch, num_tracks, output_dim]
+        x = x.view(batch_size, num_tracks, -1)
 
         return x
 
@@ -206,6 +215,8 @@ class TransformationNetwork(nn.Module):
 
         # Define TCN blocks based on configuration
         self.tcn_blocks = nn.ModuleList()
+        self.input_projection = nn.Conv1d(2, channels, kernel_size=1)
+        self.output_projection = nn.Conv1d(channels, 2, kernel_size=1)
         for layer_idx in range(num_blocks):
             dilation = 2 ** ((layer_idx) % 10)
             self.tcn_blocks.append(TCNBlock(
@@ -223,35 +234,41 @@ class TransformationNetwork(nn.Module):
     def forward(self, x, params):
         """
         Args:
-            x: input features [batch, num_tracks, length]
-            params: effect parameters [batch, num_params]
+            x: input features [batch, num_tracks, channel, length]
+            params: effect parameters [batch, num_tracks, num_params]
         
         Returns:
-            output: transformed features [batch, num_tracks, length]
+            output: transformed features [batch, num_tracks, channel, length]
         """
-        batch_size, num_tracks, length = x.shape
+        batch_size, num_tracks, channel, length = x.shape
+        if channel == 1:
+            x = x.repeat(1, 1, 2, 1)  # Convert mono to stereo
 
-        gain_dB = params[:, 0]  # [batch]
+        gain_dB = params[:, :, 0]  # [batch, num_tracks]
         gain_dB = (gain_dB - self.min_gain_dB)/(self.max_gain_dB - self.min_gain_dB)
         gain_lin = 10 ** (gain_dB / 20.0)
-        gain_lin = gain_lin.view(batch_size, num_tracks, 1)
+        gain_lin = gain_lin.view(batch_size, num_tracks, 1, 1)  # [batch, num_tracks, 1, 1]
         x = x * gain_lin
 
-        x = x.view(batch_size, num_tracks, 1, -1)  # (bs, num_tracks, 1, seq_len)
-        x = x.repeat(1, 1, 2, 1) 
-
-        pan = params[:, 1]  # [batch]
+        pan = params[:, :, 1]  # [batch, num_tracks]
         pan_theta = pan*(torch.pi/2)
         left_gain = torch.cos(pan_theta)
         right_gain = torch.sin(pan_theta)
-        pan_gains_lin = torch.stack([left_gain, right_gain], dim=1)
-        pan_gains_lin = pan_gains_lin.view(batch_size, num_tracks, 2, 1)
+        pan_gains_lin = torch.stack([left_gain, right_gain], dim=2)  # [batch, num_tracks, 2]
+        pan_gains_lin = pan_gains_lin.unsqueeze(-1)  # [batch, num_tracks, 2, 1]
         x *= pan_gains_lin
 
-        # Generate c_global from effect parameters
-        cglobal = self.conditioning_mlp(params)  # [batch, cglobal_dim]
-        
-        # Pass through TCN blocks
+        # Reshape params for per-track processing: [batch*num_tracks, num_params]
+        params_flat = params.view(batch_size * num_tracks, -1)
+
+        # Generate c_global from effect parameters for each track
+        cglobal = self.conditioning_mlp(params_flat)  # [batch*num_tracks, cglobal_dim]
+
+        # Reshape x for per-track TCN processing: [batch*num_tracks, channels, length]
+        x = x.view(batch_size * num_tracks, channel, length)
+        x = self.input_projection(x)  # Project input to match TCN channels
+
+        # Pass through TCN blocks (each track separately)
         skip = torch.zeros_like(x)
         out = x
         for block in self.tcn_blocks:
@@ -260,18 +277,24 @@ class TransformationNetwork(nn.Module):
 
         out = out + (skip/len(self.tcn_blocks))
 
-        post_gain_dB = params[:, 24]  # [batch]
+        # Project back to 2 channels: [batch*num_tracks, 128, length] → [batch*num_tracks, 2, length]
+        out = self.output_projection(out)
+
+        # Reshape back to [batch, num_tracks, channels, length]
+        out = out.view(batch_size, num_tracks, channel, length)
+
+        post_gain_dB = params[:, :, 24]  # [batch, num_tracks]
         post_gain_dB = (post_gain_dB - self.min_gain_dB)/(self.max_gain_dB - self.min_gain_dB)
         post_gain_lin = 10 ** (post_gain_dB / 20.0)
         post_gain_lin = post_gain_lin.view(batch_size, num_tracks, 1, 1)
         out = out * post_gain_lin
 
-        post_pan = params[:, 25]  # [batch]
+        post_pan = params[:, :, 25]  # [batch, num_tracks]
         post_pan_theta = post_pan*(torch.pi/2)
         post_left_gain = torch.cos(post_pan_theta)
         post_right_gain = torch.sin(post_pan_theta)
-        post_pan_gains_lin = torch.stack([post_left_gain, post_right_gain], dim=1)
-        post_pan_gains_lin = post_pan_gains_lin.view(batch_size, num_tracks, 2, 1)
+        post_pan_gains_lin = torch.stack([post_left_gain, post_right_gain], dim=2)  # [batch, num_tracks, 2]
+        post_pan_gains_lin = post_pan_gains_lin.unsqueeze(-1)  # [batch, num_tracks, 2, 1]
         out = out * post_pan_gains_lin
 
         y = torch.sum(out, dim=1)  # Sum over tracks
@@ -289,28 +312,26 @@ class SimpleTransformationNetwork(nn.Module):
         """Simplified transformation network to apply gain and panning.
 
         Args:
-            x (torch.Tensor): Input waveform stems with shape (bs, num_tracks, seq_len).
-            params (torch.Tensor): Mixing parameters with shape (bs, num_tracks, 2).
+            x (torch.Tensor): Input waveform stems with shape (batch, num_tracks, channel, seq_len).
+            params (torch.Tensor): Mixing parameters with shape (batch, num_tracks, num_params).
 
         Returns:
-            torch.Tensor: Transformed waveform with shape (bs, 2, seq_len).
+            torch.Tensor: Transformed waveform with shape (batch, num_tracks, channel, seq_len).
         """
-        bs, num_tracks, seq_len = x.size()
+        batch, num_tracks, channel, seq_len = x.size()
 
         # Apply gain
-        gain_dB = params[..., 0]  # Extract gain parameter
+        gain_dB = params[:, :, 0]  # Extract gain parameter
         gain_dB = (gain_dB - self.min_gain_dB) / (self.max_gain_dB - self.min_gain_dB)
         gain_lin = 10 ** (gain_dB / 20.0)  # Convert dB to linear scale
-        gain_lin = gain_lin.view(bs, num_tracks, 1)
+        gain_lin = gain_lin.view(batch, num_tracks, 1)
         x = x * gain_lin  # Apply gain
 
-        # Apply panning
-        x = x.view(bs, num_tracks, 1, -1).repeat(1, 1, 2, 1)  # Expand to stereo
-        pan = params[..., 1]  # Extract pan parameter
+        pan = params[:, :, 1]  # Extract pan parameter
         pan_theta = pan * torch.pi / 2
         left_gain = torch.cos(pan_theta)
         right_gain = torch.sin(pan_theta)
-        pan_gains_lin = torch.stack([left_gain, right_gain], dim=-1).view(bs, num_tracks, 2, 1)
+        pan_gains_lin = torch.stack([left_gain, right_gain], dim=-1).view(batch, num_tracks, 2, 1)
         x = x * pan_gains_lin  # Apply panning
 
         # Mix tracks
@@ -328,21 +349,29 @@ class DifferentiableMixingConsole(nn.Module):
             self.transformation_network = SimpleTransformationNetwork()
 
         self.encoder = VGGishEncoder(sample_rate=sample_rate, pretrained=True)
-        self.post_processor = PostProcessor(input_dim=128+10, output_dim=10)
+        self.post_processor = PostProcessor(input_dim=128+128, output_dim=26)  # 128 (track_emb) + 128 (context)
         # Additional initialization code can be added here
     
     def forward(self, x, track_mask=None):
-        batch_size, num_tracks, seq_len = x.size()
+        """
+        Args:
+            x: input features [batch, num_tracks, channel, length]
+        """
+        batch_size, num_tracks, channel, seq_len = x.size()
 
         # if no track_mask supplied assume all tracks active
         if track_mask is None:
             track_mask = torch.zeros(batch_size, num_tracks).type_as(x).bool()
 
+        # Flatten stereo tracks to mono for encoder: [batch*num_tracks, channel*seq_len]
+        # VGGish expects mono audio, so we'll mix stereo to mono or process channels separately
+        x_mono = x.mean(dim=2)  # Average stereo channels to mono: [batch, num_tracks, seq_len]
+
         # move tracks to the batch dimension to fully parallelize embedding computation
-        x = x.view(batch_size * num_tracks, -1)
+        x_mono = x_mono.view(batch_size * num_tracks, -1)  # [batch*num_tracks, seq_len]
 
         # generate single embedding for each track
-        e = self.encoder(x)
+        e = self.encoder(x_mono)
         e = e.view(batch_size, num_tracks, -1)  # (bs, num_tracks, d_embed)
 
         # generate the "context" embedding
@@ -350,19 +379,15 @@ class DifferentiableMixingConsole(nn.Module):
         for bidx in range(batch_size):
             c_n = e[bidx, ~track_mask[bidx, :], :].mean(
                 dim=0, keepdim=True
-            )  # (bs, 1, d_embed)
-            c_n = c_n.repeat(num_tracks, 1)  # (bs, num_tracks, d_embed)
+            )  # (1, d_embed)
+            c_n = c_n.repeat(num_tracks, 1)  # (num_tracks, d_embed)
             c.append(c_n)
-        c = torch.stack(c, dim=0)
-
-        # fuse the track embs and context embs
-        ec = torch.cat((e, c), dim=-1)  # (bs, num_tracks, d_embed*2)
+        c = torch.stack(c, dim=0)  # (bs, num_tracks, d_embed)
 
         # estimate mixing parameters for each track (in parallel)
-        p = self.post_processor(ec)  # (bs, num_tracks, num_params)
+        p = self.post_processor(e, c)  # (bs, num_tracks, num_params)
 
-        # generate the stereo mix
-        x = x.view(batch_size, num_tracks, -1)  # move tracks back from batch dim
-        y, params = self.transformation_network(x, p)  # (bs, 2, seq_len) # and denormalized params
+        # generate the stereo mix using the original stereo input
+        y, params = self.transformation_network(x, p)  # (bs, 2, seq_len)
 
         return y, params
