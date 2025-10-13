@@ -87,9 +87,20 @@ def main():
 
     # Ensure the script utilizes GPU if available, else defaults to CPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    # Create model
+    model = TransformationNetwork(
+        num_blocks=args.tcn_blocks,
+        channels=128,
+        kernel_size=15,
+        num_params=26,
+        cglobal_dim=128
+    )
+
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
+
     model = model.to(device)
     print(f'Device: {device}')
 
@@ -134,16 +145,6 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     print(f'Train: {len(train_dataset)} | Val: {len(val_dataset)}')
-
-    # Create model
-    model = TransformationNetwork(
-        num_blocks=args.tcn_blocks,
-        channels=128,
-        kernel_size=15,
-        num_params=26,
-        cglobal_dim=128
-    ).to(device)
-    print(f'TCN-{args.tcn_blocks} created')
 
     optimizer = Adam(model.parameters(), lr=args.lr)
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.patience, verbose=True)
