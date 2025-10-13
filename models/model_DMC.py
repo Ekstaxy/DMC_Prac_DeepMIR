@@ -243,6 +243,7 @@ class TransformationNetwork(nn.Module):
         batch_size, num_tracks, channel, length = x.shape
         if channel == 1:
             x = x.repeat(1, 1, 2, 1)  # Convert mono to stereo
+            channel = 2  # Update channel count after conversion
 
         gain_dB = params[:, :, 0]  # [batch, num_tracks]
         gain_dB = (gain_dB - self.min_gain_dB)/(self.max_gain_dB - self.min_gain_dB)
