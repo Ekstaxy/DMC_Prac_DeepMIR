@@ -87,6 +87,10 @@ def main():
 
     # Ensure the script utilizes GPU if available, else defaults to CPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs")
+        model = nn.DataParallel(model)
+    model = model.to(device)
     print(f'Device: {device}')
 
     # Create results directory
