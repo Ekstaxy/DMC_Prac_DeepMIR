@@ -32,22 +32,37 @@ def center_crop(y_true, y_pred):
 def train_epoch(model, dataloader, optimizer, device):
     model.train()
     total_loss = 0
+    l1_loss = torch.nn.L1Loss()
 
-    for x, y, params in dataloader:
-        x = x.to(device)  # [batch, num_tracks, channel=2, length]
-        y = y.to(device)  # [batch, channel=2, length]
-        params = params.to(device)  # [batch, 1, 26]
+    for batch_idx, (x, y, params) in enumerate(dataloader):
+        x = x.to(device)
+        y = y.to(device)
+        params = params.to(device)
+
+        if batch_idx == 0:
+            print(f"Input x: {x.shape}, range: [{x.min():.3f}, {x.max():.3f}]")
+            print(f"Target y: {y.shape}, range: [{y.min():.3f}, {y.max():.3f}]")
+            print(f"Params: {params.shape}")
 
         optimizer.zero_grad()
         y_pred, _ = model(x, params)
 
-        # Center crop ground truth to match prediction
+        if batch_idx == 0:
+            print(f"Predicted y_pred: {y_pred.shape}, range: [{y_pred.min():.3f}, {y_pred.max():.3f}]")
+
         y_crop = center_crop(y, y_pred)
 
-        # L1 loss (MAE)
-        loss = nn.L1Loss()(y_pred, y_crop)
+        if batch_idx == 0:
+            print(f"Cropped y_crop: {y_crop.shape}")
+
+        loss = l1_loss(y_pred, y_crop)
+
+        if torch.isnan(loss):
+            print(f"NaN loss at batch {batch_idx}, skipping")
+            continue
 
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
         total_loss += loss.item()
@@ -57,6 +72,7 @@ def train_epoch(model, dataloader, optimizer, device):
 def val_epoch(model, dataloader, device):
     model.eval()
     total_loss = 0
+    l1_loss = torch.nn.L1Loss()
 
     with torch.no_grad():
         for x, y, params in dataloader:
@@ -67,7 +83,11 @@ def val_epoch(model, dataloader, device):
             y_pred, _ = model(x, params)
             y_crop = center_crop(y, y_pred)
 
-            loss = nn.L1Loss()(y_pred, y_crop)
+            loss = l1_loss(y_pred, y_crop)
+
+            if torch.isnan(loss):
+                continue
+
             total_loss += loss.item()
 
     return total_loss / len(dataloader)
@@ -147,7 +167,7 @@ def main():
     print(f'Train: {len(train_dataset)} | Val: {len(val_dataset)}')
 
     optimizer = Adam(model.parameters(), lr=args.lr)
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.patience, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.patience)
 
     # Training loop
     best_val_loss = float('inf')
