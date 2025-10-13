@@ -339,7 +339,4 @@ class ENSTDrumsDataset(Dataset):
         y = y.transpose()  # Ensure (num_samples, num_channels)
         params = torch.tensor(params, dtype=torch.float32).unsqueeze(0)
 
-        print("original_shape:", x.shape)
-        print("processed_audio shape:", y.shape)
-
         return x, y, params
