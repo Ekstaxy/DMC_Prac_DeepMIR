@@ -76,11 +76,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, required=True)
     parser.add_argument('--tcn_blocks', type=int, default=10, choices=[10, 20, 30])
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--sample_rate', type=int, default=44100)
-    parser.add_argument('--length', type=int, default=65536)
+    parser.add_argument('--length', type=int, default=44100*2)
     parser.add_argument('--patience', type=int, default=20)
     parser.add_argument('--results_dir', type=str, default='results')
     args = parser.parse_args()
@@ -124,7 +124,7 @@ def main():
         apply_effects=True,
         audio_effect=audio_effect,
         remove_silence=True,
-        num_examples_per_epoch=1000,
+        num_examples_per_epoch=32,
         drummers=[1, 2, 3],
         indices=[0, 168]
     )
@@ -137,7 +137,7 @@ def main():
         apply_effects=True,
         audio_effect=audio_effect,
         remove_silence=True,
-        num_examples_per_epoch=200,
+        num_examples_per_epoch=32,
         drummers=[1, 2, 3],
         indices=[168, 189]
     )

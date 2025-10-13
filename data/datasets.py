@@ -36,7 +36,7 @@ class ENSTDrumsDataset(Dataset):
         indices: Tuple[int, int] = [0, 1],
         wet_mix: bool = False,
         hits: bool = False,
-        num_examples_per_epoch: int = 1000,
+        num_examples_per_epoch: int = 32,
         seed: int = 42,
         remove_silence: bool = False,
         silence_threshold_db: float = 20,
