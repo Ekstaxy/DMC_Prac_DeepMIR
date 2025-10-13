@@ -76,7 +76,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, required=True)
     parser.add_argument('--tcn_blocks', type=int, default=10, choices=[10, 20, 30])
-    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--sample_rate', type=int, default=44100)
