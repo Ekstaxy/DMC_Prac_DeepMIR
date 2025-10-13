@@ -1,6 +1,10 @@
 from email.mime import audio
 import os
 import sys
+
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import pymixconsole as pymc
 import numpy as np
 import soundfile as sf
