@@ -9,7 +9,7 @@ import os
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 import random
-sys.path.insert(0, '/kaggle/working/pymixconsole')
+sys.path.insert(0, '/kaggle/working/pymixconsole/pymixconsole')  # Adjust the path as necessary
 import pymixconsole as pymc
 import pymixconsole as pymc
 from torch import eq
