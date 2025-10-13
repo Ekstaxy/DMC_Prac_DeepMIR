@@ -4,10 +4,13 @@ Audio effects for data augmentation and transformation learning.
 This module provides classes to apply various audio effects to stems
 and return both the processed audio and the effect parameters.
 """
-
+import sys
+import os
 import numpy as np
 from typing import Dict, List, Optional, Tuple, Union
 import random
+sys.path.insert(0, '/kaggle/working/pymixconsole')
+import pymixconsole as pymc
 import pymixconsole as pymc
 from torch import eq
 
