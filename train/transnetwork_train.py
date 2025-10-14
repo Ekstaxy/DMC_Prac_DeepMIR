@@ -152,6 +152,7 @@ def main():
     parser.add_argument('--sample_rate', type=int, default=44100)
     parser.add_argument('--length', type=int, default=44100*1.5)
     parser.add_argument('--patience', type=int, default=20)
+    parser.add_argument('--accumulation_steps', type=int, default=4)
     parser.add_argument('--results_dir', type=str, default='results')
     args = parser.parse_args()
 
@@ -226,7 +227,7 @@ def main():
 
     print('Training started')
     for epoch in range(args.epochs):
-        train_loss = train_epoch(model, train_loader, optimizer, device)
+        train_loss = train_epoch(model, train_loader, optimizer, device, accumulation_steps=args.accumulation_steps)
         val_loss = val_epoch(model, val_loader, device)
 
         train_losses.append(train_loss)
