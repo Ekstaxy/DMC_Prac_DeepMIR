@@ -112,6 +112,19 @@ def val_epoch(model, dataloader, device):
             loss = l1_loss(y_pred, y_crop)
 
             if torch.isnan(loss):
+                print(f"NaN loss at validation batch, skipping")
+                print(f"y_pred: {y_pred}")
+                print(f"y_pred.shape: {y_pred.shape}")
+                print(f"y_pred_has_nan: {torch.isnan(y_pred).any()}")
+                print(f"y: {y}")
+                print(f"y.shape: {y.shape}")
+                print(f"y_has_nan: {torch.isnan(y).any()}")
+                print(f"y_crop: {y_crop}")
+                print(f"y_crop.shape: {y_crop.shape}")
+                print(f"y_crop_has_nan: {torch.isnan(y_crop).any()}")
+                print(f"x: {x}")
+                print(f"x.shape: {x.shape}")
+                print(f"x_has_nan: {torch.isnan(x).any()}")
                 continue
 
             total_loss += loss.item()
