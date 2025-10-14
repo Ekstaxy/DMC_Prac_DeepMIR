@@ -337,6 +337,7 @@ class ENSTDrumsDataset(Dataset):
 
         x = torch.tensor(x.T[np.newaxis, :, :], dtype=torch.float32)  # Shape: (1, length, 2)
         y = torch.tensor(y.transpose(), dtype=torch.float32)
+        y = torch.nan_to_num(y, nan=0.0, posinf=1.0, neginf=-1.0)  # Replace NaN/Inf
         params = torch.tensor(params, dtype=torch.float32).unsqueeze(0)
 
         return x, y, params
