@@ -1,148 +1,101 @@
-"""
-Simplified training script for testing the TCN-based Transformation Network pipeline.
-"""
+"""Debug script to investigate NaN loss issues"""
 
 import os
 import sys
-import json
-import argparse
-import numpy as np
-from pathlib import Path
-
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from torch.optim import Adam
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from data.datasets import ENSTDrumsDataset
 from data.audio_effects import AudioEffect
 from models.model_DMC import TransformationNetwork
 
-def center_crop(y_true, y_pred):
-    """Crop center of y_true to match y_pred size"""
-    diff = y_true.shape[-1] - y_pred.shape[-1]
-    if diff > 0:
-        start = diff // 2
-        return y_true[..., start:start + y_pred.shape[-1]]
-    return y_true
+# Setup
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Device: {device}\n')
 
-def train_epoch(model, dataloader, optimizer, device):
-    model.train()
-    total_loss = 0
+# Create dataset
+audio_effect = AudioEffect(block_size=512, sample_rate=44100)
+dataset = ENSTDrumsDataset(
+    root_dir="data/ENST-drums-audio/ENST-drums-public",  # UPDATE THIS PATH
+    length=65536,
+    sample_rate=44100,
+    train_target="transformer",
+    apply_effects=True,
+    audio_effect=audio_effect,
+    remove_silence=True,
+    num_examples_per_epoch=10
+)
 
-    for x, y, params in dataloader:
-        x = x.to(device)  # [batch, num_tracks, channel, length]
-        y = y.to(device)  # [batch, channel, length]
-        params = params.to(device)  # [batch, 1, 26]
+# Create model
+model = TransformationNetwork(num_blocks=10, channels=128).to(device)
+l1_loss = torch.nn.L1Loss()
 
-        optimizer.zero_grad()
-        y_pred, _ = model(x, params)    
+print("Testing 10 samples...\n")
+for i in range(10):
+    print(f"{'='*60}")
+    print(f"Sample {i+1}")
+    print(f"{'='*60}")
 
-        # Center crop ground truth to match prediction
-        y_crop = center_crop(y, y_pred)
+    # Get single sample
+    x, y, params = dataset[i]
 
-        # L1 loss (MAE)
-        loss = nn.L1Loss()(y_pred, y_crop)
+    print(f"x shape: {x.shape}")
+    print(f"x range: [{x.min():.6f}, {x.max():.6f}]")
+    print(f"x mean: {x.mean():.6f}, std: {x.std():.6f}")
+    print(f"x has NaN: {torch.isnan(x).any()}, has Inf: {torch.isinf(x).any()}")
 
-        loss.backward()
-        optimizer.step()
+    print(f"\ny shape: {y.shape}")
+    print(f"y range: [{y.min():.6f}, {y.max():.6f}]")
+    print(f"y mean: {y.mean():.6f}, std: {y.std():.6f}")
+    print(f"y has NaN: {torch.isnan(y).any()}, has Inf: {torch.isinf(y).any()}")
 
-        total_loss += loss.item()
+    print(f"\nparams shape: {params.shape}")
+    print(f"params range: [{params.min():.6f}, {params.max():.6f}]")
+    print(f"params has NaN: {torch.isnan(params).any()}")
 
-    return total_loss / len(dataloader)
+    # Add batch dimension and move to device (dataset returns single sample)
+    x_batch = x.unsqueeze(0).to(device)  # Add batch dim: [1, ...]
+    y_batch = y.unsqueeze(0).to(device)  # Add batch dim: [1, ...]
+    params_batch = params.unsqueeze(0).to(device)  # Add batch dim: [1, ...]
 
-def val_epoch(model, dataloader, device):
-    model.eval()
-    total_loss = 0
+    print(f"\nBatch x shape: {x_batch.shape}")
+    print(f"Batch y shape: {y_batch.shape}")
+    print(f"Batch params shape: {params_batch.shape}")
 
+    # Forward pass
     with torch.no_grad():
-        for x, y, params in dataloader:
-            x = x.to(device)  # [batch, num_tracks, channel, length]
-            y = y.to(device)  # [batch, num_tracks, channel, length]
-            params = params.to(device)  # [batch, 1, 26]
+        y_pred, _ = model(x_batch, params_batch)
 
-            y_pred, _ = model(x, params)
-            y_crop = center_crop(y, y_pred)
+    print(f"\ny_pred shape: {y_pred.shape}")
+    print(f"y_pred range: [{y_pred.min():.6f}, {y_pred.max():.6f}]")
+    print(f"y_pred mean: {y_pred.mean():.6f}, std: {y_pred.std():.6f}")
+    print(f"y_pred has NaN: {torch.isnan(y_pred).any()}, has Inf: {torch.isinf(y_pred).any()}")
 
-            loss = nn.L1Loss()(y_pred, y_crop)
-            total_loss += loss.item()
+    # Crop if needed
+    if y_pred.shape[-1] != y_batch.shape[-1]:
+        diff = y_batch.shape[-1] - y_pred.shape[-1]
+        if diff > 0:
+            start = diff // 2
+            y_crop = y_batch[..., start:start + y_pred.shape[-1]]
+        else:
+            y_crop = y_batch
+    else:
+        y_crop = y_batch
 
-    return total_loss / len(dataloader)
+    print(f"\ny_crop shape: {y_crop.shape}")
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, required=True)
-    parser.add_argument('--tcn_blocks', type=int, default=10, choices=[10, 20, 30])
-    parser.add_argument('--batch_size', type=int, default=4)  # Small batch size for testing
-    parser.add_argument('--epochs', type=int, default=5)  # Reduced epochs for testing
-    parser.add_argument('--lr', type=float, default=3e-4)
-    parser.add_argument('--sample_rate', type=int, default=44100)
-    parser.add_argument('--length', type=int, default=65536)
-    parser.add_argument('--results_dir', type=str, default='results_test')
-    args = parser.parse_args()
+    loss = l1_loss(y_pred, y_crop)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Device: {device}')
+    print(f"\nLoss: {loss.item():.6f}")
+    print(f"Loss is NaN: {torch.isnan(loss)}")
+    print(f"Loss is Inf: {torch.isinf(loss)}")
 
-    # Create results directory
-    results_dir = Path(args.results_dir) / f'TCN-{args.tcn_blocks}'
-    results_dir.mkdir(parents=True, exist_ok=True)
+    if torch.isnan(loss) or loss.item() > 1000:
+        print("\n⚠️ PROBLEM DETECTED!")
+        print("Saving problematic tensors...")
+        torch.save({
+            'x': x, 'y': y, 'params': params,
+            'y_pred': y_pred.cpu(), 'loss': loss.item()
+        }, f'debug_sample_{i}.pt')
 
-    # Create datasets
-    audio_effect = AudioEffect(block_size=512, sample_rate=args.sample_rate)
-
-    train_dataset = ENSTDrumsDataset(
-        root_dir=args.data_dir,
-        length=args.length,
-        sample_rate=args.sample_rate,
-        train_target="transformer",
-        apply_effects=True,
-        audio_effect=audio_effect,
-        remove_silence=True,
-        num_examples_per_epoch=10,  # Small dataset for testing
-        drummers=[1],
-        indices=[0, 10]  # Small range for testing
-    )
-
-    val_dataset = ENSTDrumsDataset(
-        root_dir=args.data_dir,
-        length=args.length,
-        sample_rate=args.sample_rate,
-        train_target="transformer",
-        apply_effects=True,
-        audio_effect=audio_effect,
-        remove_silence=True,
-        num_examples_per_epoch=2,  # Small validation set for testing
-        drummers=[1],
-        indices=[0, 2]  # Small range for testing
-    )
-
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
-    print(f'Train: {len(train_dataset)} | Val: {len(val_dataset)}')
-
-    # Create model
-    model = TransformationNetwork(
-        num_blocks=args.tcn_blocks,
-        channels=128,
-        kernel_size=15,
-        num_params=26,
-        cglobal_dim=128
-    ).to(device)
-    print(f'TCN-{args.tcn_blocks} created')
-
-    optimizer = Adam(model.parameters(), lr=args.lr)
-
-    # Training loop
-    print('Testing pipeline')
-    for epoch in range(args.epochs):
-        train_loss = train_epoch(model, train_loader, optimizer, device)
-        val_loss = val_epoch(model, val_loader, device)
-
-        print(f'Epoch {epoch+1}/{args.epochs} | Train: {train_loss:.6f} | Val: {val_loss:.6f}')
-
-    print('Pipeline test complete')
-
-if __name__ == '__main__':
-    main()
+    print()

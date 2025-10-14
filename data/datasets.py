@@ -335,8 +335,8 @@ class ENSTDrumsDataset(Dataset):
             params = None
             y = origin_no_silence
 
-        x = x.T[np.newaxis, :, :]
-        y = y.transpose()  # Ensure (num_samples, num_channels)
+        x = torch.tensor(x.T[np.newaxis, :, :], dtype=torch.float32)  # Shape: (1, length, 2)
+        y = torch.tensor(y.transpose(), dtype=torch.float32)
         params = torch.tensor(params, dtype=torch.float32).unsqueeze(0)
 
         return x, y, params

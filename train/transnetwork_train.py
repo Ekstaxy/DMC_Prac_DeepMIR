@@ -29,10 +29,12 @@ def center_crop(y_true, y_pred):
         return y_true[..., start:start + y_pred.shape[-1]]
     return y_true
 
-def train_epoch(model, dataloader, optimizer, device):
+def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
     model.train()
     total_loss = 0
     l1_loss = torch.nn.L1Loss()
+
+    optimizer.zero_grad()
 
     for batch_idx, (x, y, params) in enumerate(dataloader):
         x = x.to(device)
@@ -44,7 +46,6 @@ def train_epoch(model, dataloader, optimizer, device):
             print(f"Target y: {y.shape}, range: [{y.min():.3f}, {y.max():.3f}]")
             print(f"Params: {params.shape}")
 
-        optimizer.zero_grad()
         y_pred, _ = model(x, params)
 
         if batch_idx == 0:
@@ -61,11 +62,23 @@ def train_epoch(model, dataloader, optimizer, device):
             print(f"NaN loss at batch {batch_idx}, skipping")
             continue
 
+        # Scale loss by accumulation steps
+        loss = loss / accumulation_steps
         loss.backward()
+
+        # Update weights every accumulation_steps batches
+        if (batch_idx + 1) % accumulation_steps == 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            optimizer.zero_grad()
+
+        total_loss += loss.item() * accumulation_steps
+
+    # Final step if batches don't divide evenly
+    if (batch_idx + 1) % accumulation_steps != 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-
-        total_loss += loss.item()
+        optimizer.zero_grad()
 
     return total_loss / len(dataloader)
 
@@ -96,11 +109,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data_dir', type=str, required=True)
     parser.add_argument('--tcn_blocks', type=int, default=10, choices=[10, 20, 30])
-    parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--lr', type=float, default=3e-4)
     parser.add_argument('--sample_rate', type=int, default=44100)
-    parser.add_argument('--length', type=int, default=44100*2)
+    parser.add_argument('--length', type=int, default=44100*1.5)
     parser.add_argument('--patience', type=int, default=20)
     parser.add_argument('--results_dir', type=str, default='results')
     args = parser.parse_args()
