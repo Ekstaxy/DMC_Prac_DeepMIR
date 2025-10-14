@@ -127,7 +127,22 @@ class TCNBlock(nn.Module):
         
         # Learnable gain for residual connection (g_n in diagram)
         self.residual_gain = nn.Parameter(torch.ones(1))
-    
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        # Conv1d: Kaiming initialization (good for ReLU-like activations)
+        nn.init.kaiming_normal_(self.conv1d.weight, mode='fan_out', nonlinearity='relu')
+
+        # FiLM gamma: Initialize close to 1 (identity)
+        nn.init.normal_(self.gamma_linear.weight, mean=0.0, std=0.01)
+        nn.init.constant_(self.gamma_linear.bias, 1.0)
+
+        # FiLM beta: Initialize close to 0 (no shift)
+        nn.init.normal_(self.beta_linear.weight, mean=0.0, std=0.01)
+        nn.init.constant_(self.beta_linear.bias, 0.0)
+
     def forward(self, x, cglobal):
         """
         Args:

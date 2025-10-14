@@ -68,6 +68,7 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
 
         # Update weights every accumulation_steps batches
         if (batch_idx + 1) % accumulation_steps == 0:
+            # Gradient clipping
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             optimizer.zero_grad()

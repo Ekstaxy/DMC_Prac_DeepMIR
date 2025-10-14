@@ -1,15 +1,16 @@
-"""Debug script to investigate NaN loss issues"""
+"""Debug script to identify when model outputs extreme values during training"""
 
 import os
 import sys
 import torch
+from torch.optim import Adam
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from data.datasets import ENSTDrumsDataset
 from data.audio_effects import AudioEffect
 from models.model_DMC import TransformationNetwork
+from torch.utils.data import DataLoader
 
-# Setup
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f'Device: {device}\n')
 
@@ -23,79 +24,108 @@ dataset = ENSTDrumsDataset(
     apply_effects=True,
     audio_effect=audio_effect,
     remove_silence=True,
-    num_examples_per_epoch=10
+    num_examples_per_epoch=20
 )
+
+dataloader = DataLoader(dataset, batch_size=4, shuffle=True)
+print(f'Dataset: {len(dataset)} samples, Batch size: 4\n')
 
 # Create model
 model = TransformationNetwork(num_blocks=10, channels=128).to(device)
+optimizer = Adam(model.parameters(), lr=3e-4)
 l1_loss = torch.nn.L1Loss()
 
-print("Testing 10 samples...\n")
-for i in range(10):
-    print(f"{'='*60}")
-    print(f"Sample {i+1}")
-    print(f"{'='*60}")
+print("Starting small training test (5 epochs, 5 batches per epoch)\n")
+print("="*80)
 
-    # Get single sample
-    x, y, params = dataset[i]
+for epoch in range(5):
+    print(f"\nEPOCH {epoch+1}/5")
+    print("-"*80)
 
-    print(f"x shape: {x.shape}")
-    print(f"x range: [{x.min():.6f}, {x.max():.6f}]")
-    print(f"x mean: {x.mean():.6f}, std: {x.std():.6f}")
-    print(f"x has NaN: {torch.isnan(x).any()}, has Inf: {torch.isinf(x).any()}")
+    model.train()
+    epoch_loss = 0
 
-    print(f"\ny shape: {y.shape}")
-    print(f"y range: [{y.min():.6f}, {y.max():.6f}]")
-    print(f"y mean: {y.mean():.6f}, std: {y.std():.6f}")
-    print(f"y has NaN: {torch.isnan(y).any()}, has Inf: {torch.isinf(y).any()}")
+    for batch_idx, (x, y, params) in enumerate(dataloader):
+        if batch_idx >= 5:  # Only process 5 batches per epoch
+            break
 
-    print(f"\nparams shape: {params.shape}")
-    print(f"params range: [{params.min():.6f}, {params.max():.6f}]")
-    print(f"params has NaN: {torch.isnan(params).any()}")
+        x = x.to(device)
+        y = y.to(device)
+        params = params.to(device)
 
-    # Add batch dimension and move to device (dataset returns single sample)
-    x_batch = x.unsqueeze(0).to(device)  # Add batch dim: [1, ...]
-    y_batch = y.unsqueeze(0).to(device)  # Add batch dim: [1, ...]
-    params_batch = params.unsqueeze(0).to(device)  # Add batch dim: [1, ...]
+        print(f"\nBatch {batch_idx+1}/5:")
+        print(f"  x: {x.shape}, range=[{x.min():.3f}, {x.max():.3f}], mean={x.mean():.3f}")
+        print(f"  y: {y.shape}, range=[{y.min():.3f}, {y.max():.3f}], mean={y.mean():.3f}")
+        print(f"  params: {params.shape}, range=[{params.min():.3f}, {params.max():.3f}]")
 
-    print(f"\nBatch x shape: {x_batch.shape}")
-    print(f"Batch y shape: {y_batch.shape}")
-    print(f"Batch params shape: {params_batch.shape}")
+        # Check input validity
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            print("  ⚠️ WARNING: Input x has NaN/Inf!")
+        if torch.isnan(y).any() or torch.isinf(y).any():
+            print("  ⚠️ WARNING: Target y has NaN/Inf!")
 
-    # Forward pass
-    with torch.no_grad():
-        y_pred, _ = model(x_batch, params_batch)
+        optimizer.zero_grad()
+        y_pred, _ = model(x, params)
 
-    print(f"\ny_pred shape: {y_pred.shape}")
-    print(f"y_pred range: [{y_pred.min():.6f}, {y_pred.max():.6f}]")
-    print(f"y_pred mean: {y_pred.mean():.6f}, std: {y_pred.std():.6f}")
-    print(f"y_pred has NaN: {torch.isnan(y_pred).any()}, has Inf: {torch.isinf(y_pred).any()}")
+        print(f"  y_pred: {y_pred.shape}, range=[{y_pred.min():.3f}, {y_pred.max():.3f}], mean={y_pred.mean():.3f}")
 
-    # Crop if needed
-    if y_pred.shape[-1] != y_batch.shape[-1]:
-        diff = y_batch.shape[-1] - y_pred.shape[-1]
+        # Check prediction validity
+        if torch.isnan(y_pred).any():
+            print("  ❌ ERROR: y_pred has NaN!")
+            print("  Stopping training - model is outputting NaN")
+            exit()
+        if torch.isinf(y_pred).any():
+            print("  ❌ ERROR: y_pred has Inf!")
+            print("  Stopping training - model is outputting Inf")
+            exit()
+        if y_pred.abs().max() > 1000:
+            print(f"  ⚠️ WARNING: y_pred has extreme values (max={y_pred.abs().max():.1f})")
+
+        # Center crop
+        diff = y.shape[-1] - y_pred.shape[-1]
         if diff > 0:
             start = diff // 2
-            y_crop = y_batch[..., start:start + y_pred.shape[-1]]
+            y_crop = y[..., start:start + y_pred.shape[-1]]
         else:
-            y_crop = y_batch
-    else:
-        y_crop = y_batch
+            y_crop = y
 
-    print(f"\ny_crop shape: {y_crop.shape}")
+        loss = l1_loss(y_pred, y_crop)
 
-    loss = l1_loss(y_pred, y_crop)
+        print(f"  Loss: {loss.item():.6f}", end="")
 
-    print(f"\nLoss: {loss.item():.6f}")
-    print(f"Loss is NaN: {torch.isnan(loss)}")
-    print(f"Loss is Inf: {torch.isinf(loss)}")
+        if torch.isnan(loss):
+            print(" ❌ NaN!")
+            print("  Stopping training - loss is NaN")
+            exit()
+        elif torch.isinf(loss):
+            print(" ❌ Inf!")
+            print("  Stopping training - loss is Inf")
+            exit()
+        elif loss.item() > 100:
+            print(f" ⚠️ Very high loss!")
+        else:
+            print(" ✓")
 
-    if torch.isnan(loss) or loss.item() > 1000:
-        print("\n⚠️ PROBLEM DETECTED!")
-        print("Saving problematic tensors...")
-        torch.save({
-            'x': x, 'y': y, 'params': params,
-            'y_pred': y_pred.cpu(), 'loss': loss.item()
-        }, f'debug_sample_{i}.pt')
+        loss.backward()
 
-    print()
+        # Check gradients
+        max_grad = 0
+        for param in model.parameters():
+            if param.grad is not None:
+                max_grad = max(max_grad, param.grad.abs().max().item())
+        print(f"  Max gradient: {max_grad:.3f}", end="")
+        if max_grad > 100:
+            print(" ⚠️ Large gradients!")
+        else:
+            print()
+
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+
+        epoch_loss += loss.item()
+
+    avg_loss = epoch_loss / 5
+    print(f"\nEpoch {epoch+1} avg loss: {avg_loss:.6f}")
+    print("="*80)
+
+print("\n✅ Training test completed successfully - no NaN/Inf detected!")
