@@ -65,8 +65,8 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
 
         loss = l1_loss(y_pred, y_crop)
 
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"NaN/Inf loss at batch {batch_idx}, skipping")
+        if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 1e7:
+            print(f"NaN/Inf/Large loss at batch {batch_idx}, skipping")
             print(f"loss: {loss.item()}")
             print(f"y_pred: {y_pred}")
             print(f"y_pred.shape: {y_pred.shape}")
