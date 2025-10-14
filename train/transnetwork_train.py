@@ -51,6 +51,13 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
         if batch_idx == 0:
             print(f"Predicted y_pred: {y_pred.shape}, range: [{y_pred.min():.3f}, {y_pred.max():.3f}]")
 
+        # Check for Inf in prediction
+        if torch.isinf(y_pred).any():
+            print(f"Inf in y_pred at batch {batch_idx}, skipping")
+            print(f"y_pred_has_inf: {torch.isinf(y_pred).any()}")
+            print(f"y_pred max: {y_pred.max()}, min: {y_pred.min()}")
+            continue
+
         y_crop = center_crop(y, y_pred)
 
         if batch_idx == 0:
@@ -58,20 +65,25 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
 
         loss = l1_loss(y_pred, y_crop)
 
-        if torch.isnan(loss):
-            print(f"NaN loss at batch {batch_idx}, skipping")
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"NaN/Inf loss at batch {batch_idx}, skipping")
+            print(f"loss: {loss.item()}")
             print(f"y_pred: {y_pred}")
             print(f"y_pred.shape: {y_pred.shape}")
             print(f"y_pred_has_nan: {torch.isnan(y_pred).any()}")
+            print(f"y_pred_has_inf: {torch.isinf(y_pred).any()}")
             print(f"y: {y}")
             print(f"y.shape: {y.shape}")
             print(f"y_has_nan: {torch.isnan(y).any()}")
+            print(f"y_has_inf: {torch.isinf(y).any()}")
             print(f"y_crop: {y_crop}")
             print(f"y_crop.shape: {y_crop.shape}")
             print(f"y_crop_has_nan: {torch.isnan(y_crop).any()}")
+            print(f"y_crop_has_inf: {torch.isinf(y_crop).any()}")
             print(f"x: {x}")
             print(f"x.shape: {x.shape}")
             print(f"x_has_nan: {torch.isnan(x).any()}")
+            print(f"x_has_inf: {torch.isinf(x).any()}")
             continue
 
         # Scale loss by accumulation steps
@@ -107,24 +119,23 @@ def val_epoch(model, dataloader, device):
             params = params.to(device)
 
             y_pred, _ = model(x, params)
+
+            # Check for Inf in prediction
+            if torch.isinf(y_pred).any():
+                print(f"Inf in y_pred at validation, skipping")
+                continue
+
             y_crop = center_crop(y, y_pred)
 
             loss = l1_loss(y_pred, y_crop)
 
-            if torch.isnan(loss):
-                print(f"NaN loss at validation batch, skipping")
-                print(f"y_pred: {y_pred}")
-                print(f"y_pred.shape: {y_pred.shape}")
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"NaN/Inf loss at validation batch, skipping")
+                print(f"loss: {loss.item() if not torch.isnan(loss) else 'NaN'}")
                 print(f"y_pred_has_nan: {torch.isnan(y_pred).any()}")
-                print(f"y: {y}")
-                print(f"y.shape: {y.shape}")
+                print(f"y_pred_has_inf: {torch.isinf(y_pred).any()}")
                 print(f"y_has_nan: {torch.isnan(y).any()}")
-                print(f"y_crop: {y_crop}")
-                print(f"y_crop.shape: {y_crop.shape}")
-                print(f"y_crop_has_nan: {torch.isnan(y_crop).any()}")
-                print(f"x: {x}")
-                print(f"x.shape: {x.shape}")
-                print(f"x_has_nan: {torch.isnan(x).any()}")
+                print(f"y_has_inf: {torch.isinf(y).any()}")
                 continue
 
             total_loss += loss.item()
