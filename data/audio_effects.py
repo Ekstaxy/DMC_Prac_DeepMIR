@@ -140,6 +140,9 @@ class AudioEffect:
 
             processed_audio[start:stop] = self.channel.process(audio[start:stop])
 
+        # Replace NaN/Inf with 0 (can occur with silent audio + effects)
+        processed_audio = np.nan_to_num(processed_audio, nan=0.0, posinf=0.0, neginf=0.0)
+
         return processed_audio, parameters
 
 
