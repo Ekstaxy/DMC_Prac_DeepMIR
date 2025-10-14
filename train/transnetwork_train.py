@@ -60,6 +60,9 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
 
         if torch.isnan(loss):
             print(f"NaN loss at batch {batch_idx}, skipping")
+            print(f"y_pred: {y_pred}")
+            print(f"y_crop: {y_crop}")
+            print(f"x: {x}")
             continue
 
         # Scale loss by accumulation steps
@@ -184,7 +187,7 @@ def main():
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=args.patience)
 
     # Training loop
-    best_val_loss = float('inf')
+    best_val_loss = float(10e8)
     train_losses = []
     val_losses = []
 
