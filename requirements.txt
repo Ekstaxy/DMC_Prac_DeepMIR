@@ -5,4 +5,3 @@ librosa
 torchaudio
 soundfile
 matplotlib
-opencv-python
