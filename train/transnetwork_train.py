@@ -32,6 +32,8 @@ def center_crop(y_true, y_pred):
 def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
     model.train()
     total_loss = 0
+    valid_batches = 0
+    recent_losses = []  # Track recent losses for spike detection
     l1_loss = torch.nn.L1Loss()
 
     optimizer.zero_grad()
@@ -51,13 +53,6 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
         if batch_idx == 0:
             print(f"Predicted y_pred: {y_pred.shape}, range: [{y_pred.min():.3f}, {y_pred.max():.3f}]")
 
-        # Check for Inf in prediction
-        if torch.isinf(y_pred).any():
-            print(f"Inf in y_pred at batch {batch_idx}, skipping")
-            print(f"y_pred_has_inf: {torch.isinf(y_pred).any()}")
-            print(f"y_pred max: {y_pred.max()}, min: {y_pred.min()}")
-            continue
-
         y_crop = center_crop(y, y_pred)
 
         if batch_idx == 0:
@@ -65,26 +60,26 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
 
         loss = l1_loss(y_pred, y_crop)
 
-        if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 1e7:
-            print(f"NaN/Inf/Large loss at batch {batch_idx}, skipping")
-            print(f"loss: {loss.item()}")
-            print(f"y_pred: {y_pred}")
-            print(f"y_pred.shape: {y_pred.shape}")
-            print(f"y_pred_has_nan: {torch.isnan(y_pred).any()}")
-            print(f"y_pred_has_inf: {torch.isinf(y_pred).any()}")
-            print(f"y: {y}")
-            print(f"y.shape: {y.shape}")
-            print(f"y_has_nan: {torch.isnan(y).any()}")
-            print(f"y_has_inf: {torch.isinf(y).any()}")
-            print(f"y_crop: {y_crop}")
-            print(f"y_crop.shape: {y_crop.shape}")
-            print(f"y_crop_has_nan: {torch.isnan(y_crop).any()}")
-            print(f"y_crop_has_inf: {torch.isinf(y_crop).any()}")
-            print(f"x: {x}")
-            print(f"x.shape: {x.shape}")
-            print(f"x_has_nan: {torch.isnan(x).any()}")
-            print(f"x_has_inf: {torch.isinf(x).any()}")
+        # Enhanced loss validation
+        if torch.isnan(loss) or torch.isinf(loss) or loss.item() < 0:
+            print(f"Invalid loss at batch {batch_idx}: {loss.item()}, skipping")
             continue
+
+        # Spike detection using recent loss history
+        if len(recent_losses) >=3:
+            recent_avg = sum(recent_losses) / len(recent_losses)
+            recent_std = (sum((x - recent_avg) ** 2 for x in recent_losses) / len(recent_losses)) ** 0.5
+            
+            # Skip if loss is more than 3 standard deviations above recent average
+            # or more than 10x the recent average
+            if (loss.item() > recent_avg + 3 * recent_std and loss.item() > recent_avg * 3) or loss.item() > 1e5:
+                print(f"Loss spike detected at batch {batch_idx}: {loss.item():.6f} (avg: {recent_avg:.6f}, std: {recent_std:.6f}), skipping")
+                continue
+
+        # Update recent losses (keep last 10)
+        recent_losses.append(loss.item())
+        if len(recent_losses) > 10:
+            recent_losses.pop(0)
 
         # Scale loss by accumulation steps
         loss = loss / accumulation_steps
@@ -98,6 +93,7 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
             optimizer.zero_grad()
 
         total_loss += loss.item() * accumulation_steps
+        valid_batches += 1
 
     # Final step if batches don't divide evenly
     if (batch_idx + 1) % accumulation_steps != 0:
@@ -105,7 +101,7 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
         optimizer.step()
         optimizer.zero_grad()
 
-    return total_loss / len(dataloader)
+    return total_loss / max(valid_batches, 1)  # Avoid division by zero
 
 def val_epoch(model, dataloader, device):
     model.eval()
@@ -258,11 +254,25 @@ def main():
 
     # Plot losses
     plt.figure(figsize=(10, 6))
+    
+    # Calculate reasonable y-axis limits by filtering out extreme outliers
+    all_losses = train_losses + val_losses
+    # Remove extreme outliers (values above 95th percentile)
+    percentile_95 = np.percentile(all_losses, 95)
+    filtered_losses = [loss for loss in all_losses if loss <= percentile_95]
+    
+    # Set y-axis limit to 110% of the 95th percentile of filtered data
+    if filtered_losses:
+        y_max = max(filtered_losses) * 1.1
+    else:
+        y_max = max(all_losses) * 1.1
+    
     plt.plot(train_losses, label='Train')
     plt.plot(val_losses, label='Val')
     plt.xlabel('Epoch')
     plt.ylabel('L1 Loss')
     plt.title(f'TCN-{args.tcn_blocks} Training')
+    plt.ylim(0, y_max)  # Set y-axis limit to suppress spikes
     plt.legend()
     plt.grid(True)
     plt.savefig(results_dir / 'loss_curve.png', dpi=150)
