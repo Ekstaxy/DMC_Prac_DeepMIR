@@ -4,6 +4,7 @@ import os
 import sys
 import torch
 from torch.optim import Adam
+import auraloss
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from data.datasets import ENSTDrumsDataset
@@ -41,7 +42,19 @@ print(f'Batches per epoch: {len(dataloader)}\n')
 # Create model
 model = TransformationNetwork(num_blocks=10, channels=128).to(device)
 optimizer = Adam(model.parameters(), lr=3e-4)
-l1_loss = torch.nn.L1Loss()
+l1_loss = auraloss.freq.SumAndDifferenceSTFTLoss(
+    fft_sizes = [512, 1024, 2048],  # Multiple scales for multi-resolution
+    hop_sizes = [128, 256, 512],    # 25% overlap (hop = fft_size/4)
+    win_lengths = [512, 1024, 2048], # Same as fft_sizes for full window
+    window = "hann_window",
+    w_sum = 1.0,
+    w_diff = 1.0,
+    output = "loss",
+    sample_rate = 44100,
+    perceptual_weighting=True,
+    scale = 'mel',
+    n_bins = 64
+)
 
 accumulation_steps = 4
 print(f"Gradient accumulation: {accumulation_steps} steps")

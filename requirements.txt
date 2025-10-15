@@ -1,8 +1,8 @@
 torch
+auraloss
 numpy
 librosa
 torchaudio
-auraloss
 soundfile
 matplotlib
 opencv-python
