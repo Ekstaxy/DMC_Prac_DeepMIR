@@ -9,6 +9,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+import auraloss
 
 import torch
 import torch.nn as nn
@@ -34,7 +35,19 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
     total_loss = 0
     valid_batches = 0
     recent_losses = []  # Track recent losses for spike detection
-    l1_loss = torch.nn.L1Loss()
+    sum_and_diff_STFT_loss = auraloss.freq.SumAndDifferenceSTFTLoss(
+        fft_sizes = [512, 1024, 2048],  # Multiple scales for multi-resolution
+        hop_sizes = [128, 256, 512],    # 25% overlap (hop = fft_size/4)
+        win_lengths = [512, 1024, 2048], # Same as fft_sizes for full window
+        window = "hann_window",
+        w_sum = 1.0,
+        w_diff = 1.0,
+        output = "loss",
+        sample_rate = 44100,
+        perceptual_weighting=True,
+        scale = 'mel',
+        n_bins = 64
+    )
 
     optimizer.zero_grad()
 
@@ -58,7 +71,7 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
         if batch_idx == 0:
             print(f"Cropped y_crop: {y_crop.shape}")
 
-        loss = l1_loss(y_pred, y_crop)
+        loss = sum_and_diff_STFT_loss(y_pred, y_crop)
 
         # Enhanced loss validation
         if torch.isnan(loss) or torch.isinf(loss) or loss.item() < 0:
@@ -106,7 +119,19 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
 def val_epoch(model, dataloader, device):
     model.eval()
     total_loss = 0
-    l1_loss = torch.nn.L1Loss()
+    sum_and_diff_STFT_loss = auraloss.freq.SumAndDifferenceSTFTLoss(
+        fft_sizes = [512, 1024, 2048],  # Multiple scales for multi-resolution
+        hop_sizes = [128, 256, 512],    # 25% overlap (hop = fft_size/4)
+        win_lengths = [512, 1024, 2048], # Same as fft_sizes for full window
+        window = "hann_window",
+        w_sum = 1.0,
+        w_diff = 1.0,
+        output = "loss",
+        sample_rate = 44100,
+        perceptual_weighting=True,
+        scale = 'mel',
+        n_bins = 64
+    )
 
     with torch.no_grad():
         for x, y, params in dataloader:
@@ -123,7 +148,7 @@ def val_epoch(model, dataloader, device):
 
             y_crop = center_crop(y, y_pred)
 
-            loss = l1_loss(y_pred, y_crop)
+            loss = sum_and_diff_STFT_loss(y_pred, y_crop)
 
             if torch.isnan(loss) or torch.isinf(loss):
                 print(f"NaN/Inf loss at validation batch, skipping")
