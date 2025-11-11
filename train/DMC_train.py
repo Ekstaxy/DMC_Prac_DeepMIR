@@ -244,7 +244,7 @@ def main():
 
         train_dataset = ENSTDrumsDataset(
             root_dir=args.data_dir,
-            length=88200,  # ~3 seconds at 44100 Hz
+            length=44100,  # ~1 second at 44100 Hz
             sample_rate=44100,
             drummers=[1, 2, 3],
             indices=[0, train_split],
@@ -252,7 +252,7 @@ def main():
         )
         val_dataset = ENSTDrumsDataset(
             root_dir=args.data_dir,
-            length=88200,
+            length=44100,
             sample_rate=44100,
             drummers=[1, 2, 3],
             indices=[train_split, total_mixes],
