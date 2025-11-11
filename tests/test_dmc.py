@@ -3,20 +3,6 @@ import argparse
 from pathlib import Path
 import os
 
-# Get token from command line argument
-if len(sys.argv) > 1:
-    HF_TOKEN = sys.argv[1]
-else:
-    HF_TOKEN = ""  # ← Or paste your token here
-
-if not HF_TOKEN:
-    print("❌ Please provide token: python script.py YOUR_TOKEN")
-    sys.exit(1)
-
-# Login
-from huggingface_hub import login
-login(token=HF_TOKEN)
-
 # Add project root to Python path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -29,8 +15,7 @@ def test_dmc(
     encoder_type="VGGish",
     transformation_arch="Original",
     checkpoint_path=None,
-    use_gpu=False,
-    hf_token=None
+    use_gpu=False
 ):
     """
     Test DifferentiableMixingConsole with various configurations.
@@ -40,22 +25,10 @@ def test_dmc(
         transformation_arch: Type of transformation network ("Original" or "Simple")
         checkpoint_path: Optional path to pretrained transformation network checkpoint
         use_gpu: Whether to use GPU if available
-        hf_token: HuggingFace token (required for StableAudio encoder)
     """
     print("=" * 70)
     print("Testing DifferentiableMixingConsole")
     print("=" * 70)
-
-    # Handle HuggingFace login for StableAudio encoder
-    if encoder_type == "StableAudio":
-        if hf_token:
-            print("Logging in to HuggingFace with provided token...")
-            from huggingface_hub import login
-            login(token=hf_token)
-            print("✓ HuggingFace login successful\n")
-        else:
-            print("Note: StableAudio encoder requires HuggingFace authentication.")
-            print("Either provide --hf_token or run: huggingface-cli login\n")
 
     # Device setup
     if use_gpu and torch.cuda.is_available():
@@ -155,6 +128,13 @@ def test_dmc(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test DifferentiableMixingConsole")
+
+    parser.add_argument(
+        "--hf_token",
+        type=str,
+        default=None,
+        help="HuggingFace token (required for StableAudio encoder)"
+    )
     parser.add_argument(
         "--encoder",
         type=str,
@@ -180,22 +160,25 @@ if __name__ == "__main__":
         action="store_true",
         help="Use GPU if available"
     )
-    parser.add_argument(
-        "--hf_token",
-        type=str,
-        default=None,
-        help="HuggingFace token (required for StableAudio encoder). Can also use env var HF_TOKEN or huggingface-cli login"
-    )
 
     args = parser.parse_args()
 
-    # Check for token in environment variable if not provided
+    # Get token from args or environment variable
     hf_token = args.hf_token or os.environ.get('HF_TOKEN')
+
+    # Login to HuggingFace if token provided
+    if hf_token:
+        print("Logging in to HuggingFace...")
+        from huggingface_hub import login
+        login(token=hf_token)
+        print("✓ HuggingFace login successful\n")
+    elif args.encoder == "StableAudio":
+        print("⚠ Warning: StableAudio encoder requires HuggingFace authentication.")
+        print("Provide --hf_token or set HF_TOKEN environment variable\n")
 
     test_dmc(
         encoder_type=args.encoder,
         transformation_arch=args.arch,
         checkpoint_path=args.checkpoint,
-        use_gpu=args.gpu,
-        hf_token=hf_token
+        use_gpu=args.gpu
     )
