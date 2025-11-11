@@ -246,6 +246,7 @@ def main():
             root_dir=args.data_dir,
             length=88200,  # ~3 seconds at 44100 Hz
             sample_rate=44100,
+            drummers=[1, 2, 3],
             indices=[0, train_split],
             num_examples_per_epoch=1000,  # Adjust as needed
         )
@@ -253,6 +254,7 @@ def main():
             root_dir=args.data_dir,
             length=88200,
             sample_rate=44100,
+            drummers=[1, 2, 3],
             indices=[train_split, total_mixes],
             num_examples_per_epoch=200,  # Adjust as needed
         )
