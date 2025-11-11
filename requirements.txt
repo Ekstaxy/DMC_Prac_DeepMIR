@@ -5,3 +5,5 @@ librosa
 torchaudio
 soundfile
 matplotlib
+resampy
+diffusers

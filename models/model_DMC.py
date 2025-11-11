@@ -2,6 +2,21 @@ import torch
 import torch.nn as nn
 
 import torchaudio
+import sys
+
+if len(sys.argv) > 1:
+    HF_TOKEN = sys.argv[1]
+else:
+    HF_TOKEN = ""  # ← Or paste your token here
+
+if not HF_TOKEN:
+    print("❌ Please provide token: python script.py YOUR_TOKEN")
+    sys.exit(1)
+
+# Login
+from huggingface_hub import login
+login(token=HF_TOKEN)
+from diffusers import AutoencoderOobleck
 
 class VGGishEncoder(nn.Module):
     def __init__(self, sample_rate, pretrained=True):
@@ -37,7 +52,93 @@ class VGGishEncoder(nn.Module):
                 z = torch.empty((0,))
 
         return z
-    
+
+class StableAudioEncoder(nn.Module):
+    """
+    Encoder using Stable Audio Open VAE for audio embedding extraction.
+    Similar to VGGishEncoder but uses the Stable Audio Open model.
+    """
+    def __init__(self, sample_rate, pretrained=True, embedding_dim=128):
+        super(StableAudioEncoder, self).__init__()
+        self.sample_rate = sample_rate
+        self.embedding_dim = embedding_dim
+
+        # Load Stable Audio Open VAE encoder
+        if pretrained:
+            print("Loading Stable Audio Open VAE encoder...")
+            self.vae = AutoencoderOobleck.from_pretrained(
+                "stabilityai/stable-audio-open-1.0",
+                subfolder="vae"
+            )
+            self.vae.eval()
+            print("Stable Audio Open VAE encoder loaded")
+        else:
+            raise ValueError("Non-pretrained Stable Audio Open encoder not supported")
+
+        # Freeze VAE parameters
+        for param in self.vae.parameters():
+            param.requires_grad = False
+
+        # Projection layer to map latent features to embedding_dim (128 to match VGGish)
+        # The VAE encoder outputs latents with 64 channels, we'll pool and project
+        self.projection = nn.Linear(64, embedding_dim)
+
+    def forward(self, x):
+        """
+        Args:
+            x: input audio [batch_size, num_samples] (mono)
+
+        Returns:
+            z: embeddings [batch_size, embedding_dim] (default 128)
+        """
+        if len(x.shape) == 3:
+            x = x.squeeze(1)  # Remove channel dimension if present
+
+        batch_size, num_samples = x.shape
+
+        # Resample to 44100 Hz if needed (Stable Audio Open expects 44100 Hz)
+        if self.sample_rate != 44100:
+            resampler = torchaudio.transforms.Resample(
+                orig_freq=self.sample_rate,
+                new_freq=44100
+            ).to(x.device)
+            x = resampler(x)
+            num_samples = x.shape[1]
+
+        # Convert mono to stereo (Stable Audio Open expects stereo input)
+        x_stereo = x.unsqueeze(1).repeat(1, 2, 1)  # [batch_size, 2, num_samples]
+
+        # Ensure minimum length for VAE (pad if necessary)
+        min_length = 44100  # At least 1 second
+        if num_samples < min_length:
+            pad_length = min_length - num_samples
+            x_stereo = torch.nn.functional.pad(x_stereo, (0, pad_length))
+
+        z = []
+        with torch.no_grad():
+            for bidx in range(batch_size):
+                x_item = x_stereo[bidx:bidx+1]  # [1, 2, num_samples]
+
+                # Encode with VAE
+                latent_dist = self.vae.encode(x_item).latent_dist
+                z_item = latent_dist.sample()  # [1, channels, latent_time]
+
+                # Pool across time dimension to get fixed-size representation
+                z_item = z_item.mean(dim=-1)  # [1, channels]
+                z_item = z_item.squeeze(0)     # [channels]
+
+                z.append(z_item)
+
+        if len(z) > 0:
+            z = torch.stack(z, dim=0)  # [batch_size, channels]
+        else:
+            z = torch.empty((0, 64))
+
+        # Project to embedding_dim (128 to match VGGish)
+        z = self.projection(z)  # [batch_size, embedding_dim]
+
+        return z
+
 class PostProcessor(nn.Module):
     def __init__(self, input_dim=128, output_dim=26):
         super(PostProcessor, self).__init__()
@@ -353,19 +454,39 @@ class SimpleTransformationNetwork(nn.Module):
         # Mix tracks
         y = torch.sum(x, dim=1)  # Sum tracks to create stereo mix
 
-        return y
+        return y, params
     
 class DifferentiableMixingConsole(nn.Module):
-    def __init__(self, sample_rate=44100, transformation_arch="Original")->None:
+    def __init__(self, sample_rate=44100, transformation_arch="Original", encoder_type="VGGish")->None:
+        """
+        Args:
+            sample_rate: audio sample rate
+            transformation_arch: transformation network architecture ("Original" or "Simple")
+            encoder_type: encoder to use for audio embeddings ("VGGish" or "StableAudio")
+        """
         super(DifferentiableMixingConsole, self).__init__()
         self.sample_rate = sample_rate
+        self.encoder_type = encoder_type
+
+        # Initialize transformation network
         if transformation_arch == "Original":
             self.transformation_network = TransformationNetwork()
         elif transformation_arch == "Simple":
-            self.transformation_network = SimpleTransformationNetwork()
+            self.transformation_network = SimpleTransformationNetwork(sample_rate=sample_rate)
+        else:
+            raise ValueError(f"Unknown transformation_arch: {transformation_arch}")
 
-        self.encoder = VGGishEncoder(sample_rate=sample_rate, pretrained=True)
-        self.post_processor = PostProcessor(input_dim=128+128, output_dim=26)  # 128 (track_emb) + 128 (context)
+        # Initialize encoder based on encoder_type
+        if encoder_type == "VGGish":
+            self.encoder = VGGishEncoder(sample_rate=sample_rate, pretrained=True)
+            embedding_dim = 128
+        elif encoder_type == "StableAudio":
+            self.encoder = StableAudioEncoder(sample_rate=sample_rate, pretrained=True, embedding_dim=128)
+            embedding_dim = 128
+        else:
+            raise ValueError(f"Unknown encoder_type: {encoder_type}. Choose 'VGGish' or 'StableAudio'")
+
+        self.post_processor = PostProcessor(input_dim=embedding_dim+embedding_dim, output_dim=26)  # track_emb + context
         # Additional initialization code can be added here
     
     def forward(self, x, track_mask=None):
@@ -407,3 +528,117 @@ class DifferentiableMixingConsole(nn.Module):
         y, params = self.transformation_network(x, p)  # (bs, 2, seq_len)
 
         return y, params
+    
+if __name__ == "__main__":
+    print("=" * 60)
+    print("Testing DifferentiableMixingConsole")
+    print("=" * 60)
+
+    # Set device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}\n")
+
+    # Test parameters
+    batch_size = 2
+    num_tracks = 3
+    sample_rate = 44100
+    duration_sec = 2  # Use shorter duration for faster testing
+    seq_len = sample_rate * duration_sec
+
+    # Test 1: VGGish encoder (more reliable, doesn't need HuggingFace)
+    print("-" * 60)
+    print("Test 1: VGGish Encoder + Original Transformation")
+    print("-" * 60)
+    try:
+        model_vggish = DifferentiableMixingConsole(
+            sample_rate=sample_rate,
+            transformation_arch="Original",
+            encoder_type="VGGish"
+        )
+        model_vggish = model_vggish.to(device)
+        model_vggish.eval()
+
+        dummy_input = torch.randn(batch_size, num_tracks, 2, seq_len).to(device)
+        print(f"Input shape: {dummy_input.shape}")
+
+        with torch.no_grad():
+            output, params = model_vggish(dummy_input)
+
+        print(f"Output shape: {output.shape} (expected: [{batch_size}, 2, {seq_len}])")
+        print(f"Params shape: {params.shape} (expected: [{batch_size}, {num_tracks}, 26])")
+
+        # Validate shapes
+        assert output.shape == (batch_size, 2, seq_len), f"Output shape mismatch!"
+        assert params.shape == (batch_size, num_tracks, 26), f"Params shape mismatch!"
+        print("✓ VGGish test passed!\n")
+
+    except Exception as e:
+        print(f"✗ VGGish test failed: {e}\n")
+
+    # Test 2: StableAudio encoder (requires HuggingFace access)
+    print("-" * 60)
+    print("Test 2: StableAudio Encoder + Original Transformation")
+    print("-" * 60)
+    print("Note: This requires HuggingFace access and may take time to download")
+
+    try:
+        model_stable = DifferentiableMixingConsole(
+            sample_rate=sample_rate,
+            transformation_arch="Original",
+            encoder_type="StableAudio"
+        )
+        model_stable = model_stable.to(device)
+        model_stable.eval()
+
+        dummy_input = torch.randn(batch_size, num_tracks, 2, seq_len).to(device)
+        print(f"Input shape: {dummy_input.shape}")
+
+        with torch.no_grad():
+            output, params = model_stable(dummy_input)
+
+        print(f"Output shape: {output.shape} (expected: [{batch_size}, 2, {seq_len}])")
+        print(f"Params shape: {params.shape} (expected: [{batch_size}, {num_tracks}, 26])")
+
+        # Validate shapes
+        assert output.shape == (batch_size, 2, seq_len), f"Output shape mismatch!"
+        assert params.shape == (batch_size, num_tracks, 26), f"Params shape mismatch!"
+        print("✓ StableAudio test passed!\n")
+
+    except Exception as e:
+        print(f"✗ StableAudio test failed: {e}")
+        print("   (This is expected if you're not logged in to HuggingFace)\n")
+
+    # Test 3: Simple transformation network
+    print("-" * 60)
+    print("Test 3: VGGish Encoder + Simple Transformation")
+    print("-" * 60)
+
+    try:
+        model_simple = DifferentiableMixingConsole(
+            sample_rate=sample_rate,
+            transformation_arch="Simple",
+            encoder_type="VGGish"
+        )
+        model_simple = model_simple.to(device)
+        model_simple.eval()
+
+        dummy_input = torch.randn(batch_size, num_tracks, 2, seq_len).to(device)
+        print(f"Input shape: {dummy_input.shape}")
+
+        with torch.no_grad():
+            output, params = model_simple(dummy_input)
+
+        print(f"Output shape: {output.shape} (expected: [{batch_size}, 2, {seq_len}])")
+        print(f"Params shape: {params.shape} (expected: [{batch_size}, {num_tracks}, 26])")
+
+        # Validate shapes
+        assert output.shape == (batch_size, 2, seq_len), f"Output shape mismatch!"
+        assert params.shape == (batch_size, num_tracks, 26), f"Params shape mismatch!"
+        print("✓ Simple transformation test passed!\n")
+
+    except Exception as e:
+        print(f"✗ Simple transformation test failed: {e}\n")
+
+    print("=" * 60)
+    print("Testing complete!")
+    print("=" * 60)
