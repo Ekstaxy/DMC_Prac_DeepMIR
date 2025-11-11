@@ -26,11 +26,12 @@ def center_crop(y_true, y_pred):
         return y_true[..., start:start + y_pred.shape[-1]]
     return y_true
 
-def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
+def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4, use_amp=False):
     model.train()
     total_loss = 0
     valid_batches = 0
     recent_losses = []  # Track recent losses for spike detection
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
     sum_and_diff_STFT_loss = auraloss.freq.SumAndDifferenceSTFTLoss(
         fft_sizes = [512, 1024, 2048],  # Multiple scales for multi-resolution
         hop_sizes = [128, 256, 512],    # 25% overlap (hop = fft_size/4)
@@ -57,7 +58,12 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
             print(f"Target y: {y.shape}, range: [{y.min():.3f}, {y.max():.3f}]")
             print(f"Pad mask: {pad_mask.shape}")
 
-        y_pred, params_pred = model(x)
+        # Mixed precision forward pass
+        if use_amp:
+            with torch.cuda.amp.autocast():
+                y_pred, params_pred = model(x)
+        else:
+            y_pred, params_pred = model(x)
 
         if batch_idx == 0:
             print(f"Predicted y_pred: {y_pred.shape}, range: [{y_pred.min():.3f}, {y_pred.max():.3f}]")
@@ -92,13 +98,23 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
 
         # Scale loss by accumulation steps
         loss = loss / accumulation_steps
-        loss.backward()
+
+        if use_amp:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
         # Update weights every accumulation_steps batches
         if (batch_idx + 1) % accumulation_steps == 0:
             # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            if use_amp:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
             optimizer.zero_grad()
 
         total_loss += loss.item() * accumulation_steps
@@ -106,8 +122,14 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
 
     # Final step if batches don't divide evenly
     if (batch_idx + 1) % accumulation_steps != 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        if use_amp:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
         optimizer.zero_grad()
 
     return total_loss / max(valid_batches, 1)  # Avoid division by zero
@@ -178,6 +200,8 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4, help="Number of data loader workers")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Device to use for training")
+    parser.add_argument("--use_amp", action="store_true",
+                        help="Use automatic mixed precision (FP16) to reduce memory")
 
     args = parser.parse_args()
 
@@ -299,7 +323,7 @@ def main():
         print(f"{'='*70}")
 
         # Train
-        train_loss = train_epoch(model, train_loader, optimizer, args.device, args.accumulation_steps)
+        train_loss = train_epoch(model, train_loader, optimizer, args.device, args.accumulation_steps, args.use_amp)
         train_losses.append(train_loss)
         print(f"Train Loss: {train_loss:.6f}")
 
