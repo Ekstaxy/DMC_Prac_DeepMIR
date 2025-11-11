@@ -232,7 +232,7 @@ def main():
         # First, get total number of available examples
         import glob
         all_mixes = []
-        for drummer in [1, 2]:  # Default drummers
+        for drummer in [1, 2, 3]:  # Default drummers
             search_path = os.path.join(args.data_dir, f"drummer_{drummer}", "audio", "dry_mix", "*.wav")
             all_mixes.extend(glob.glob(search_path))
 
@@ -244,14 +244,14 @@ def main():
 
         train_dataset = ENSTDrumsDataset(
             root_dir=args.data_dir,
-            length=131072,  # ~3 seconds at 44100 Hz
+            length=88200,  # ~3 seconds at 44100 Hz
             sample_rate=44100,
             indices=[0, train_split],
             num_examples_per_epoch=1000,  # Adjust as needed
         )
         val_dataset = ENSTDrumsDataset(
             root_dir=args.data_dir,
-            length=131072,
+            length=88200,
             sample_rate=44100,
             indices=[train_split, total_mixes],
             num_examples_per_epoch=200,  # Adjust as needed
