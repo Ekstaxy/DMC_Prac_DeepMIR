@@ -182,7 +182,7 @@ class ENSTDrumsDataset(Dataset):
         y /= y.abs().max().clamp(1e-8)  # peak normalize
 
         # -------------------- load the tracks from disk --------------------
-        x = torch.zeros((self.max_num_tracks, self.length))
+        x = torch.zeros((self.max_num_tracks, 2, self.length))  # Changed to stereo
         pad = [True] * self.max_num_tracks  # note which tracks are empty
 
         for tidx, track_name in enumerate(self.track_names):
@@ -211,7 +211,11 @@ class ENSTDrumsDataset(Dataset):
                     elif x_s.shape[1] > self.length:
                         x_s = x_s[:, :self.length]
 
-                x[tidx, :] = x_s
+                # Convert mono to stereo if needed
+                if x_s.shape[0] == 1:
+                    x_s = x_s.repeat(2, 1)
+
+                x[tidx, :, :] = x_s
                 pad[tidx] = False
 
         # -------------------- apply effects if enabled --------------------
@@ -222,25 +226,25 @@ class ENSTDrumsDataset(Dataset):
 
             for tidx in range(self.max_num_tracks):
                 if not pad[tidx]:  # Only apply to non-empty tracks
-                    # Extract single stem - convert to (num_samples, num_channels) format
-                    stem = x[tidx].numpy()  # Shape: (length,)
-                    # Reshape to (num_samples, 1) for mono audio
-                    stem_reshaped = stem.reshape(-1, 1)
+                    # Extract single stem - shape: [2, length]
+                    stem = x[tidx].numpy()  # Shape: [2, length]
+                    # Transpose to (num_samples, num_channels) format for audio_effect
+                    stem_transposed = stem.T  # Shape: [length, 2]
 
                     # Apply audio effect and get parameters
                     effected_stem, params = self.audio_effect.apply(
-                        stem_reshaped,
+                        stem_transposed,
                         int(sr),
                         parameters=[],
                         randomnize=True
                     )
 
                     # effected_stem shape: (num_samples, 2) - stereo output
-                    # Convert back to mono by averaging channels and flatten
-                    effected_mono = effected_stem.mean(axis=1)
+                    # Transpose back to [2, length]
+                    effected_stereo = effected_stem.T  # Shape: [2, length]
 
                     # Store effected stem and parameters
-                    y_effected[tidx] = torch.from_numpy(effected_mono)
+                    y_effected[tidx] = torch.from_numpy(effected_stereo)
                     effect_params.append(params)
                 else:
                     effect_params.append(None)

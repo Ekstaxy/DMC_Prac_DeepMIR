@@ -47,17 +47,17 @@ def train_epoch(model, dataloader, optimizer, device, accumulation_steps=4):
 
     optimizer.zero_grad()
 
-    for batch_idx, (x, y, params) in enumerate(dataloader):
+    for batch_idx, (x, y, pad_mask) in enumerate(dataloader):
         x = x.to(device)
         y = y.to(device)
-        params = params.to(device)
+        pad_mask = pad_mask.to(device)
 
         if batch_idx == 0:
             print(f"Input x: {x.shape}, range: [{x.min():.3f}, {x.max():.3f}]")
             print(f"Target y: {y.shape}, range: [{y.min():.3f}, {y.max():.3f}]")
-            print(f"Params: {params.shape}")
+            print(f"Pad mask: {pad_mask.shape}")
 
-        y_pred, _ = model(x, params)
+        y_pred, params_pred = model(x)
 
         if batch_idx == 0:
             print(f"Predicted y_pred: {y_pred.shape}, range: [{y_pred.min():.3f}, {y_pred.max():.3f}]")
@@ -130,12 +130,12 @@ def val_epoch(model, dataloader, device):
     )
 
     with torch.no_grad():
-        for x, y, params in dataloader:
+        for x, y, pad_mask in dataloader:
             x = x.to(device)
             y = y.to(device)
-            params = params.to(device)
+            pad_mask = pad_mask.to(device)
 
-            y_pred, _ = model(x, params)
+            y_pred, params_pred = model(x)
 
             # Check for Inf in prediction
             if torch.isinf(y_pred).any():
@@ -169,6 +169,8 @@ def main():
                         help="Transformation network architecture (default: Original)")
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Path to pretrained transformation network checkpoint")
+    parser.add_argument("--hf_token", type=str, default=None,
+                        help="HuggingFace token (required for StableAudio encoder)")
     parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
@@ -178,6 +180,18 @@ def main():
                         help="Device to use for training")
 
     args = parser.parse_args()
+
+    # Login to HuggingFace if using StableAudio encoder
+    hf_token = args.hf_token or os.environ.get('HF_TOKEN')
+    if args.encoder == "StableAudio":
+        if hf_token:
+            print("Logging in to HuggingFace...")
+            from huggingface_hub import login
+            login(token=hf_token)
+            print("✓ HuggingFace login successful\n")
+        else:
+            print("⚠ Warning: StableAudio encoder requires HuggingFace authentication.")
+            print("Provide --hf_token or set HF_TOKEN environment variable\n")
 
     # Create results directory
     results_dir = Path(args.results_dir)
@@ -203,31 +217,51 @@ def main():
         encoder_type=args.encoder
     )
 
-    # Load checkpoint if provided
+    model = model.to(args.device)
+    print(f"✓ Model initialized on {args.device}")
+
+    # Load checkpoint if provided (after moving to device)
     if args.checkpoint:
         print(f"Loading checkpoint from: {args.checkpoint}")
         model.load_transformation_checkpoint(args.checkpoint, device=args.device)
 
-    model = model.to(args.device)
-    print(f"✓ Model initialized on {args.device}")
-
     # Initialize datasets
     print("\nInitializing datasets...")
     try:
+        # Assuming 80/20 train/val split
+        # First, get total number of available examples
+        import glob
+        all_mixes = []
+        for drummer in [1, 2]:  # Default drummers
+            search_path = os.path.join(args.data_dir, f"drummer_{drummer}", "audio", "dry_mix", "*.wav")
+            all_mixes.extend(glob.glob(search_path))
+
+        total_mixes = len([f for f in all_mixes if "norm" not in f and "hits" not in f])
+        train_split = int(0.8 * total_mixes)
+
+        print(f"Total mixes found: {total_mixes}")
+        print(f"Train split: 0-{train_split}, Val split: {train_split}-{total_mixes}")
+
         train_dataset = ENSTDrumsDataset(
-            data_dir=args.data_dir,
-            split='train',
-            sample_rate=44100
+            root_dir=args.data_dir,
+            length=131072,  # ~3 seconds at 44100 Hz
+            sample_rate=44100,
+            indices=[0, train_split],
+            num_examples_per_epoch=1000,  # Adjust as needed
         )
         val_dataset = ENSTDrumsDataset(
-            data_dir=args.data_dir,
-            split='val',
-            sample_rate=44100
+            root_dir=args.data_dir,
+            length=131072,
+            sample_rate=44100,
+            indices=[train_split, total_mixes],
+            num_examples_per_epoch=200,  # Adjust as needed
         )
-        print(f"✓ Train dataset: {len(train_dataset)} samples")
-        print(f"✓ Val dataset: {len(val_dataset)} samples")
+        print(f"✓ Train dataset: {len(train_dataset)} samples per epoch")
+        print(f"✓ Val dataset: {len(val_dataset)} samples per epoch")
     except Exception as e:
         print(f"✗ Dataset initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
         print("Please check your data directory and dataset implementation")
         return
 
