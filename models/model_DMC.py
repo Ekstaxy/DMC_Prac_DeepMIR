@@ -1,22 +1,6 @@
 import torch
 import torch.nn as nn
-
 import torchaudio
-import sys
-
-if len(sys.argv) > 1:
-    HF_TOKEN = sys.argv[1]
-else:
-    HF_TOKEN = ""  # ← Or paste your token here
-
-if not HF_TOKEN:
-    print("❌ Please provide token: python script.py YOUR_TOKEN")
-    sys.exit(1)
-
-# Login
-from huggingface_hub import login
-login(token=HF_TOKEN)
-from diffusers import AutoencoderOobleck
 
 class VGGishEncoder(nn.Module):
     def __init__(self, sample_rate, pretrained=True):
@@ -57,6 +41,9 @@ class StableAudioEncoder(nn.Module):
     """
     Encoder using Stable Audio Open VAE for audio embedding extraction.
     Similar to VGGishEncoder but uses the Stable Audio Open model.
+
+    Note: Requires HuggingFace login for downloading the model.
+    Make sure to run: huggingface-cli login
     """
     def __init__(self, sample_rate, pretrained=True, embedding_dim=128):
         super(StableAudioEncoder, self).__init__()
@@ -65,13 +52,31 @@ class StableAudioEncoder(nn.Module):
 
         # Load Stable Audio Open VAE encoder
         if pretrained:
+            # Lazy import to avoid requiring diffusers when not using StableAudio encoder
+            try:
+                from diffusers import AutoencoderOobleck
+            except ImportError:
+                raise ImportError(
+                    "diffusers package is required for StableAudioEncoder. "
+                    "Install it with: pip install diffusers"
+                )
+
             print("Loading Stable Audio Open VAE encoder...")
-            self.vae = AutoencoderOobleck.from_pretrained(
-                "stabilityai/stable-audio-open-1.0",
-                subfolder="vae"
-            )
-            self.vae.eval()
-            print("Stable Audio Open VAE encoder loaded")
+            print("Note: This requires HuggingFace authentication.")
+            print("If download fails, run: huggingface-cli login")
+
+            try:
+                self.vae = AutoencoderOobleck.from_pretrained(
+                    "stabilityai/stable-audio-open-1.0",
+                    subfolder="vae"
+                )
+                self.vae.eval()
+                print("Stable Audio Open VAE encoder loaded")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load Stable Audio Open model: {e}\n"
+                    "Make sure you are logged in to HuggingFace: huggingface-cli login"
+                )
         else:
             raise ValueError("Non-pretrained Stable Audio Open encoder not supported")
 
@@ -488,7 +493,25 @@ class DifferentiableMixingConsole(nn.Module):
 
         self.post_processor = PostProcessor(input_dim=embedding_dim+embedding_dim, output_dim=26)  # track_emb + context
         # Additional initialization code can be added here
-    
+
+    def load_transformation_checkpoint(self, checkpoint_path, device='cpu'):
+        """
+        Load a pretrained transformation network checkpoint.
+
+        Args:
+            checkpoint_path: Path to the checkpoint file (.pth)
+            device: Device to load the checkpoint on
+        """
+        print(f"Loading transformation network checkpoint from: {checkpoint_path}")
+        state_dict = torch.load(checkpoint_path, map_location=device)
+
+        # Handle DataParallel wrapper prefix if present
+        if any(key.startswith('module.') for key in state_dict.keys()):
+            state_dict = {key.replace('module.', ''): value for key, value in state_dict.items()}
+
+        self.transformation_network.load_state_dict(state_dict)
+        print("✓ Checkpoint loaded successfully!")
+
     def forward(self, x, track_mask=None):
         """
         Args:
@@ -528,117 +551,3 @@ class DifferentiableMixingConsole(nn.Module):
         y, params = self.transformation_network(x, p)  # (bs, 2, seq_len)
 
         return y, params
-    
-if __name__ == "__main__":
-    print("=" * 60)
-    print("Testing DifferentiableMixingConsole")
-    print("=" * 60)
-
-    # Set device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}\n")
-
-    # Test parameters
-    batch_size = 2
-    num_tracks = 3
-    sample_rate = 44100
-    duration_sec = 2  # Use shorter duration for faster testing
-    seq_len = sample_rate * duration_sec
-
-    # Test 1: VGGish encoder (more reliable, doesn't need HuggingFace)
-    print("-" * 60)
-    print("Test 1: VGGish Encoder + Original Transformation")
-    print("-" * 60)
-    try:
-        model_vggish = DifferentiableMixingConsole(
-            sample_rate=sample_rate,
-            transformation_arch="Original",
-            encoder_type="VGGish"
-        )
-        model_vggish = model_vggish.to(device)
-        model_vggish.eval()
-
-        dummy_input = torch.randn(batch_size, num_tracks, 2, seq_len).to(device)
-        print(f"Input shape: {dummy_input.shape}")
-
-        with torch.no_grad():
-            output, params = model_vggish(dummy_input)
-
-        print(f"Output shape: {output.shape} (expected: [{batch_size}, 2, {seq_len}])")
-        print(f"Params shape: {params.shape} (expected: [{batch_size}, {num_tracks}, 26])")
-
-        # Validate shapes
-        assert output.shape == (batch_size, 2, seq_len), f"Output shape mismatch!"
-        assert params.shape == (batch_size, num_tracks, 26), f"Params shape mismatch!"
-        print("✓ VGGish test passed!\n")
-
-    except Exception as e:
-        print(f"✗ VGGish test failed: {e}\n")
-
-    # Test 2: StableAudio encoder (requires HuggingFace access)
-    print("-" * 60)
-    print("Test 2: StableAudio Encoder + Original Transformation")
-    print("-" * 60)
-    print("Note: This requires HuggingFace access and may take time to download")
-
-    try:
-        model_stable = DifferentiableMixingConsole(
-            sample_rate=sample_rate,
-            transformation_arch="Original",
-            encoder_type="StableAudio"
-        )
-        model_stable = model_stable.to(device)
-        model_stable.eval()
-
-        dummy_input = torch.randn(batch_size, num_tracks, 2, seq_len).to(device)
-        print(f"Input shape: {dummy_input.shape}")
-
-        with torch.no_grad():
-            output, params = model_stable(dummy_input)
-
-        print(f"Output shape: {output.shape} (expected: [{batch_size}, 2, {seq_len}])")
-        print(f"Params shape: {params.shape} (expected: [{batch_size}, {num_tracks}, 26])")
-
-        # Validate shapes
-        assert output.shape == (batch_size, 2, seq_len), f"Output shape mismatch!"
-        assert params.shape == (batch_size, num_tracks, 26), f"Params shape mismatch!"
-        print("✓ StableAudio test passed!\n")
-
-    except Exception as e:
-        print(f"✗ StableAudio test failed: {e}")
-        print("   (This is expected if you're not logged in to HuggingFace)\n")
-
-    # Test 3: Simple transformation network
-    print("-" * 60)
-    print("Test 3: VGGish Encoder + Simple Transformation")
-    print("-" * 60)
-
-    try:
-        model_simple = DifferentiableMixingConsole(
-            sample_rate=sample_rate,
-            transformation_arch="Simple",
-            encoder_type="VGGish"
-        )
-        model_simple = model_simple.to(device)
-        model_simple.eval()
-
-        dummy_input = torch.randn(batch_size, num_tracks, 2, seq_len).to(device)
-        print(f"Input shape: {dummy_input.shape}")
-
-        with torch.no_grad():
-            output, params = model_simple(dummy_input)
-
-        print(f"Output shape: {output.shape} (expected: [{batch_size}, 2, {seq_len}])")
-        print(f"Params shape: {params.shape} (expected: [{batch_size}, {num_tracks}, 26])")
-
-        # Validate shapes
-        assert output.shape == (batch_size, 2, seq_len), f"Output shape mismatch!"
-        assert params.shape == (batch_size, num_tracks, 26), f"Params shape mismatch!"
-        print("✓ Simple transformation test passed!\n")
-
-    except Exception as e:
-        print(f"✗ Simple transformation test failed: {e}\n")
-
-    print("=" * 60)
-    print("Testing complete!")
-    print("=" * 60)

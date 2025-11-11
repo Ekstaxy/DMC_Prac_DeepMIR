@@ -17,19 +17,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from data.datasets import ENSTDrumsDataset
 from data.audio_effects import AudioEffect
 from models.model_DMC import TransformationNetwork, DifferentiableMixingConsole
-if len(sys.argv) > 1:
-    HF_TOKEN = sys.argv[1]
-else:
-    HF_TOKEN = ""  # ← Or paste your token here
-
-if not HF_TOKEN:
-    print("❌ Please provide token: python script.py YOUR_TOKEN")
-    sys.exit(1)
-
-# Login
-from huggingface_hub import login
-login(token=HF_TOKEN)
-from diffusers import AutoencoderOobleck
 
 def center_crop(y_true, y_pred):
     """Crop center of y_true to match y_pred size"""
@@ -171,3 +158,167 @@ def val_epoch(model, dataloader, device):
             total_loss += loss.item()
 
     return total_loss / len(dataloader)
+
+def main():
+    parser = argparse.ArgumentParser(description="Train DifferentiableMixingConsole")
+    parser.add_argument("--data_dir", type=str, default="HW2/data", help="Path to data directory")
+    parser.add_argument("--results_dir", type=str, default="results/dmc_training", help="Directory to save results")
+    parser.add_argument("--encoder", type=str, default="VGGish", choices=["VGGish", "StableAudio"],
+                        help="Encoder type (default: VGGish)")
+    parser.add_argument("--arch", type=str, default="Original", choices=["Original", "Simple"],
+                        help="Transformation network architecture (default: Original)")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to pretrained transformation network checkpoint")
+    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=4, help="Batch size")
+    parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
+    parser.add_argument("--accumulation_steps", type=int, default=4, help="Gradient accumulation steps")
+    parser.add_argument("--num_workers", type=int, default=4, help="Number of data loader workers")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+                        help="Device to use for training")
+
+    args = parser.parse_args()
+
+    # Create results directory
+    results_dir = Path(args.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save configuration
+    with open(results_dir / 'config.json', 'w') as f:
+        json.dump(vars(args), f, indent=4)
+
+    print("=" * 70)
+    print("Training DifferentiableMixingConsole")
+    print("=" * 70)
+    print(f"Configuration:")
+    for key, value in vars(args).items():
+        print(f"  {key}: {value}")
+    print()
+
+    # Initialize model
+    print("Initializing model...")
+    model = DifferentiableMixingConsole(
+        sample_rate=44100,
+        transformation_arch=args.arch,
+        encoder_type=args.encoder
+    )
+
+    # Load checkpoint if provided
+    if args.checkpoint:
+        print(f"Loading checkpoint from: {args.checkpoint}")
+        model.load_transformation_checkpoint(args.checkpoint, device=args.device)
+
+    model = model.to(args.device)
+    print(f"✓ Model initialized on {args.device}")
+
+    # Initialize datasets
+    print("\nInitializing datasets...")
+    try:
+        train_dataset = ENSTDrumsDataset(
+            data_dir=args.data_dir,
+            split='train',
+            sample_rate=44100
+        )
+        val_dataset = ENSTDrumsDataset(
+            data_dir=args.data_dir,
+            split='val',
+            sample_rate=44100
+        )
+        print(f"✓ Train dataset: {len(train_dataset)} samples")
+        print(f"✓ Val dataset: {len(val_dataset)} samples")
+    except Exception as e:
+        print(f"✗ Dataset initialization failed: {e}")
+        print("Please check your data directory and dataset implementation")
+        return
+
+    # Initialize data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True if args.device == "cuda" else False
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True if args.device == "cuda" else False
+    )
+
+    # Initialize optimizer and scheduler
+    optimizer = Adam(model.parameters(), lr=args.lr)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+
+    # Training loop
+    print("\nStarting training...")
+    best_val_loss = float('inf')
+    train_losses = []
+    val_losses = []
+
+    for epoch in range(args.epochs):
+        print(f"\n{'='*70}")
+        print(f"Epoch {epoch+1}/{args.epochs}")
+        print(f"{'='*70}")
+
+        # Train
+        train_loss = train_epoch(model, train_loader, optimizer, args.device, args.accumulation_steps)
+        train_losses.append(train_loss)
+        print(f"Train Loss: {train_loss:.6f}")
+
+        # Validate
+        val_loss = val_epoch(model, val_loader, args.device)
+        val_losses.append(val_loss)
+        print(f"Val Loss: {val_loss:.6f}")
+
+        # Update scheduler
+        scheduler.step(val_loss)
+
+        # Save best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            checkpoint = {
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': train_loss,
+                'val_loss': val_loss,
+                'config': vars(args)
+            }
+            torch.save(checkpoint, results_dir / 'best_model.pth')
+            print(f"✓ Best model saved (val_loss: {val_loss:.6f})")
+
+        # Save latest checkpoint
+        checkpoint = {
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'config': vars(args)
+        }
+        torch.save(checkpoint, results_dir / 'latest_model.pth')
+
+        # Plot losses
+        plt.figure(figsize=(10, 5))
+        plt.plot(train_losses, label='Train Loss')
+        plt.plot(val_losses, label='Val Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training Progress')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig(results_dir / 'training_loss.png', dpi=150, bbox_inches='tight')
+        plt.close()
+
+    # Save final model
+    torch.save(model.state_dict(), results_dir / 'final_model.pth')
+    print(f"\n{'='*70}")
+    print(f"✓ Training complete!")
+    print(f"  Best val loss: {best_val_loss:.6f}")
+    print(f"  Results saved to: {results_dir}")
+    print(f"{'='*70}")
+
+if __name__ == "__main__":
+    main()
